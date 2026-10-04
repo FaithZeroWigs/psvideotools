@@ -13,7 +13,7 @@ $OrigFile   = Join-Path $Folder "$($BaseName)$VideoExt.orig"
 $OutputFile = Join-Path $Folder "$($BaseName)$VideoExt"
 
 # Get matching SRTs
-$SubtitleFiles = Get-ChildItem $Folder -Filter "$BaseName*.srt" -File
+$SubtitleFiles = Get-ChildItem -LiteralPath $Folder -Filter "$BaseName*.srt" -File
 
 if (-not $SubtitleFiles) {
     Write-Host "No matching SRT files found."
