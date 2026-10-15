@@ -64,17 +64,23 @@ Converts audio streams that typically lack hardware decoding support to AC3, so 
 
 # Replace the DTS/EAC3/TrueHD streams with their AC3 versions instead
 .\ConvertAudio3.ps1 "path\to\video.mkv" -Replace
+
+# Process every .mkv/.mp4 in a folder, asking for confirmation per file
+.\ConvertAudio3.ps1 "path\to\videos" -ConfirmEach
 ```
 
 ### Parameters
 
-| Parameter    | Description                                                                    |
-|--------------|--------------------------------------------------------------------------------|
-| `-InputFile` | Path to the `.mkv` or `.mp4` file (required).                                  |
-| `-Replace`   | Replace the converted streams with AC3 instead of keeping the originals.       |
+| Parameter       | Description                                                                                          |
+|-----------------|------------------------------------------------------------------------------------------------------|
+| `-InputPath`    | Path to a `.mkv` or `.mp4` file, or to a folder of such files (required). `-InputFile` accepted as an alias. |
+| `-Replace`      | Replace the converted streams with AC3 instead of keeping the originals.                             |
+| `-ConfirmEach`  | Prompt for confirmation before processing each file. Off by default (no prompts).                    |
 
 ### Behavior details
 
 - If no audio stream needs conversion, the script reports "Nothing to do" and exits without modifying the file.
 - The AC3 stream derived from the source default stream becomes the new default; the original default flag is cleared.
 - New AC3 streams are tagged with a `title` of `AC3 (<language>)`.
+- Folder input: all `.mkv`/`.mp4` files in the folder (sorted by name) are processed, each with the same behavior as a single-file run.
+- Batch runs continue after a per-file error and exit with code `1` at the end if any file failed.

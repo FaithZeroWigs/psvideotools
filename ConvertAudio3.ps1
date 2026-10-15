@@ -1,8 +1,9 @@
 param (
     [Parameter(Mandatory = $true)]
-    [string]$InputFile,
+    [Alias("InputFile")]
+    [string]$InputPath,
     [switch]$Replace,
-    [switch]$Confirm
+    [switch]$ConfirmEach
 )
 
 # Audio codecs that typically lack device support and should be converted to AC3.
@@ -19,26 +20,26 @@ if (-not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
 }
 
 # Validate input path
-if (-not (Test-Path -LiteralPath $InputFile)) {
-    Write-Error "Input path '$InputFile' does not exist."
+if (-not (Test-Path -LiteralPath $InputPath)) {
+    Write-Error "Input path '$InputPath' does not exist."
     exit 1
 }
 
 # Determine processing targets: a single file, or all .mkv/.mp4 files inside a folder.
 $targets = @()
-if ((Get-Item -LiteralPath $InputFile).PSIsContainer) {
+if ((Get-Item -LiteralPath $InputPath).PSIsContainer) {
     $targets = @(
-        Get-ChildItem -LiteralPath $InputFile -File |
+        Get-ChildItem -LiteralPath $InputPath -File |
             Where-Object { $_.Extension -ieq ".mkv" -or $_.Extension -ieq ".mp4" } |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
     )
     if ($targets.Count -lt 1) {
-        Write-Error "No .mkv or .mp4 files found in folder '$InputFile'."
+        Write-Error "No .mkv or .mp4 files found in folder '$InputPath'."
         exit 1
     }
 } else {
-    $targets = @((Resolve-Path -LiteralPath $InputFile).Path)
+    $targets = @((Resolve-Path -LiteralPath $InputPath).Path)
 }
 
 function Get-AudioStreams([string]$path) {
@@ -102,40 +103,40 @@ function Invoke-Convert([string]$inPath, [string]$outPath, $audioStreams, [bool]
         }
     }
 
-    $args = @(
+    $ffmpegArgs = @(
         "-hide_banner",
         "-i", $inPath,
 
         "-map", "0:v?"
     )
 
-    foreach ($d in $defs) { $args += @("-map", "0:a:$($d.inputIndex)") }
+    foreach ($d in $defs) { $ffmpegArgs += @("-map", "0:a:$($d.inputIndex)") }
 
     if ($keepSubs) {
-        $args += @("-map", "0:s?")
+        $ffmpegArgs += @("-map", "0:s?")
     }
 
-    $args += @("-c:v", "copy")
+    $ffmpegArgs += @("-c:v", "copy")
 
     for ($j = 0; $j -lt $defs.Count; $j++) {
         $d = $defs[$j]
         if ($d.mode -eq "ac3") {
-            $args += @("-c:a:$j", "ac3")
+            $ffmpegArgs += @("-c:a:$j", "ac3")
 
             $disp = "0"
             if ($d.src.isDefault) { $disp = "default" }
             elseif ($d.src.isForced) { $disp = "forced" }
-            $args += @("-disposition:a:$j", $disp)
+            $ffmpegArgs += @("-disposition:a:$j", $disp)
 
             $title = "AC3"
             if ($d.src.lang) { $title = "AC3 ($($d.src.lang))" }
-            $args += @("-metadata:s:a:$j", "title=$title")
+            $ffmpegArgs += @("-metadata:s:a:$j", "title=$title")
         } else {
-            $args += @("-c:a:$j", "copy")
+            $ffmpegArgs += @("-c:a:$j", "copy")
 
             # Clear default on the copied original when its AC3 twin takes over.
             if (-not $replace -and ($convertCodecs -contains $d.src.codec)) {
-                $args += @("-disposition:a:$j", "0")
+                $ffmpegArgs += @("-disposition:a:$j", "0")
             }
         }
     }
@@ -143,20 +144,20 @@ function Invoke-Convert([string]$inPath, [string]$outPath, $audioStreams, [bool]
     if ($keepSubs) {
         if ($ext -eq ".mp4") {
             # MP4 generally supports mov_text subtitles (text-based). Copying subs often fails.
-            $args += @("-c:s", "mov_text")
+            $ffmpegArgs += @("-c:s", "mov_text")
         } else {
-            $args += @("-c:s", "copy")
+            $ffmpegArgs += @("-c:s", "copy")
         }
     }
 
     if ($ext -eq ".mp4") {
-        $args += @("-movflags", "+faststart")
+        $ffmpegArgs += @("-movflags", "+faststart")
     }
 
-    $args += @($outPath)
+    $ffmpegArgs += @($outPath)
 
-    Write-Host "Running: ffmpeg $($args -join ' ')"
-    & ffmpeg @args
+    Write-Host "Running: ffmpeg $($ffmpegArgs -join ' ')"
+    & ffmpeg @ffmpegArgs
     return $LASTEXITCODE
 }
 
@@ -236,7 +237,7 @@ function Convert-OneFile([string]$file, [bool]$replace) {
 
 $failed = $false
 foreach ($target in $targets) {
-    if ($Confirm) {
+    if ($ConfirmEach) {
         $answer = Read-Host "Convert '$target'? [y/N]"
         if ($answer -notmatch '^[yY]') {
             Write-Host "Skipping '$target'."
