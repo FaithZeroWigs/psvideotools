@@ -84,3 +84,4 @@ Converts audio streams that typically lack hardware decoding support to AC3, so 
 - New AC3 streams are tagged with a `title` of `AC3 (<language>)`.
 - Folder input: all `.mkv`/`.mp4` files in the folder (sorted by name) are processed, each with the same behavior as a single-file run.
 - Batch runs continue after a per-file error and exit with code `1` at the end if any file failed.
+- Console output is limited to the command being run plus a live progress marker; the full ffmpeg output is written to a log file instead. The log is named `<folder>.log` inside the folder when processing a folder, or `<file>.log` next to the file when processing a single file.

@@ -26,11 +26,12 @@ if (-not (Test-Path -LiteralPath $InputPath)) {
 }
 
 # Determine processing targets: a single file, or all .mkv/.mp4 files inside a folder.
+$isFolderInput = (Get-Item -LiteralPath $InputPath).PSIsContainer
 $targets = @()
-if ((Get-Item -LiteralPath $InputPath).PSIsContainer) {
+if ($isFolderInput) {
     $targets = @(
         Get-ChildItem -LiteralPath $InputPath -File |
-            Where-Object { $_.Extension -ieq ".mkv" -or $_.Extension -ieq ".mp4" } |
+            Where-Object { ($_.Extension -ieq ".mkv" -or $_.Extension -ieq ".mp4") -and $_.BaseName -notlike "*.temp" } |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
     )
@@ -40,6 +41,15 @@ if ((Get-Item -LiteralPath $InputPath).PSIsContainer) {
     }
 } else {
     $targets = @((Resolve-Path -LiteralPath $InputPath).Path)
+}
+
+# Detailed ffmpeg output goes to a log: '<folder>.log' inside the folder when
+# processing a folder, or '<file>.log' next to the file otherwise.
+$inputRoot = (Resolve-Path -LiteralPath $InputPath).Path
+if ($isFolderInput) {
+    $logPath = Join-Path $inputRoot ((Split-Path -Leaf $inputRoot) + ".log")
+} else {
+    $logPath = Join-Path ([System.IO.Path]::GetDirectoryName($inputRoot)) ([System.IO.Path]::GetFileNameWithoutExtension($inputRoot) + ".log")
 }
 
 function Get-AudioStreams([string]$path) {
@@ -82,7 +92,7 @@ function Get-AudioStreams([string]$path) {
 }
 
 
-function Invoke-Convert([string]$inPath, [string]$outPath, $audioStreams, [bool]$keepSubs, [bool]$replace, [string]$ext) {
+function Invoke-Convert([string]$inPath, [string]$outPath, $audioStreams, [bool]$keepSubs, [bool]$replace, [string]$ext, [string]$logPath) {
     $convertStreams = @($audioStreams | Where-Object { $convertCodecs -contains $_.codec })
 
     # Build ordered output-audio stream definitions.
@@ -159,13 +169,43 @@ function Invoke-Convert([string]$inPath, [string]$outPath, $audioStreams, [bool]
     Write-Host "Running: ffmpeg $($ffmpegArgs -join ' ')"
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & ffmpeg @ffmpegArgs 2>&1 | ForEach-Object { Write-Host $_ }
-    $rc = $LASTEXITCODE
-    $ErrorActionPreference = $prevEAP
+    $writer = New-Object System.IO.StreamWriter($logPath, $true)
+    $spinner = @("|", "/", "-", "\")
+    $spin = 0
+    $prevLen = 0
+    try {
+        $writer.WriteLine("")
+        $writer.WriteLine("=== ffmpeg: $inPath")
+        $writer.WriteLine("Command: ffmpeg $($ffmpegArgs -join ' ')")
+        & ffmpeg @ffmpegArgs 2>&1 | ForEach-Object {
+            $line = [string]$_
+            $writer.WriteLine($line)
+            if ($line -match "frame=") {
+                $marker = $spinner[$spin % 4] + " " + $line.TrimEnd()
+                $pad = " " * [Math]::Max(0, $prevLen - $marker.Length)
+                Write-Host -NoNewline ("`r  " + $marker + $pad)
+                $prevLen = $marker.Length + 2
+                $spin++
+            } elseif ($line -match "error|Error") {
+                Write-Host $line
+            }
+        }
+        $rc = $LASTEXITCODE
+    } finally {
+        $writer.Close()
+        $ErrorActionPreference = $prevEAP
+    }
+    Write-Host ""
     return $rc
 }
 
-function Convert-OneFile([string]$file, [bool]$replace) {
+function Write-Log([string]$logPath, [string]$text) {
+    $writer = New-Object System.IO.StreamWriter($logPath, $true)
+    $writer.WriteLine($text)
+    $writer.Close()
+}
+
+function Convert-OneFile([string]$file, [bool]$replace, [string]$logPath) {
     $fullPath = (Resolve-Path -LiteralPath $file).Path
     $ext = [System.IO.Path]::GetExtension($fullPath).ToLowerInvariant()
     if ($ext -ne ".mkv" -and $ext -ne ".mp4") {
@@ -201,6 +241,7 @@ function Convert-OneFile([string]$file, [bool]$replace) {
     $convertStreams = @($audioStreams | Where-Object { $convertCodecs -contains $_.codec })
     if ($convertStreams.Count -lt 1) {
         Write-Host "No audio streams require conversion (target codecs: $($convertCodecs -join ', ')). Nothing to do."
+        Write-Log $logPath "Nothing to do: $fullPath"
         return $true
     }
 
@@ -211,21 +252,24 @@ function Convert-OneFile([string]$file, [bool]$replace) {
 
     $mode = if ($replace) { "replace" } else { "add" }
     Write-Host "Converting $($convertStreams.Count) audio stream(s) to AC3 (mode: $mode) for file: $fullPath ..."
+    Write-Log $logPath "Converting $($convertStreams.Count) audio stream(s) to AC3 (mode: $mode): $fullPath"
 
     $keepSubs = $true
-    $rc = Invoke-Convert -inPath $fullPath -outPath $tempOut -audioStreams $audioStreams -keepSubs $keepSubs -replace $replace -ext $ext
+    $rc = Invoke-Convert -inPath $fullPath -outPath $tempOut -audioStreams $audioStreams -keepSubs $keepSubs -replace $replace -ext $ext -logPath $logPath
 
     # If MP4 + subtitles fails, retry without subtitles (common when subs are not MP4-compatible)
     if ($rc -ne 0 -and $ext -eq ".mp4" -and $keepSubs) {
         Write-Warning "Conversion failed with subtitles for MP4. Retrying without subtitles..."
+        Write-Log $logPath "WARNING: MP4 conversion with subtitles failed; retrying without subtitles."
         if (Test-Path -LiteralPath $tempOut) {
             Remove-Item -LiteralPath $tempOut -Force
         }
-        $rc = Invoke-Convert -inPath $fullPath -outPath $tempOut -audioStreams $audioStreams -keepSubs $false -replace $replace -ext $ext
+        $rc = Invoke-Convert -inPath $fullPath -outPath $tempOut -audioStreams $audioStreams -keepSubs $false -replace $replace -ext $ext -logPath $logPath
     }
 
     if ($rc -ne 0) {
         Write-Error "ffmpeg encountered an error during conversion."
+        Write-Log $logPath "ERROR: ffmpeg exited with code $rc for $fullPath"
         return $false
     }
 
@@ -236,6 +280,7 @@ function Convert-OneFile([string]$file, [bool]$replace) {
     Rename-Item -LiteralPath $tempOut -NewName $fullPath
 
     Write-Host "Conversion complete. Original file backed up as '$backup'."
+    Write-Log $logPath "Complete: $fullPath (backup: $backup)"
     return $true
 }
 
@@ -249,7 +294,7 @@ foreach ($target in $targets) {
         }
     }
 
-    if (-not (Convert-OneFile -file $target -replace $Replace)) {
+    if (-not (Convert-OneFile -file $target -replace $Replace -logPath $logPath)) {
         $failed = $true
     }
 }

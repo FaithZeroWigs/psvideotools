@@ -16,6 +16,8 @@ scripts change.
   disposition, and the default subtitle track.
 - `ConvertAudio3.ps1 -InputPath <file|folder> [-Replace] [-ConfirmEach]` — transcode
   DTS/E-AC3/TrueHD/MLP audio streams to AC3 for devices that can't decode them.
+  Console shows only the command plus a live progress marker; full ffmpeg output
+  goes to a log (`<folder>.log` or `<file>.log` next to the input).
 
 ## Commands
 
