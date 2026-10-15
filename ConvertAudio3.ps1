@@ -31,7 +31,11 @@ $targets = @()
 if ($isFolderInput) {
     $targets = @(
         Get-ChildItem -LiteralPath $InputPath -File |
-            Where-Object { ($_.Extension -ieq ".mkv" -or $_.Extension -ieq ".mp4") -and $_.BaseName -notlike "*.temp" } |
+            Where-Object {
+                ($_.Extension -ieq ".mkv" -or $_.Extension -ieq ".mp4") -and
+                -not ($_.BaseName -like "*.temp" -and
+                    (Test-Path -LiteralPath (Join-Path $_.DirectoryName (($_.BaseName -replace '\.temp$', '') + $_.Extension))))
+            } |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
     )
@@ -115,6 +119,7 @@ function Invoke-Convert([string]$inPath, [string]$outPath, $audioStreams, [bool]
 
     $ffmpegArgs = @(
         "-hide_banner",
+        "-y",
         "-i", $inPath,
 
         "-map", "0:v?"
@@ -205,11 +210,15 @@ function Write-Log([string]$logPath, [string]$text) {
     $writer.Close()
 }
 
+function Write-Fail([string]$msg) {
+    Write-Host "ERROR: $msg" -ForegroundColor Red
+}
+
 function Convert-OneFile([string]$file, [bool]$replace, [string]$logPath) {
     $fullPath = (Resolve-Path -LiteralPath $file).Path
     $ext = [System.IO.Path]::GetExtension($fullPath).ToLowerInvariant()
     if ($ext -ne ".mkv" -and $ext -ne ".mp4") {
-        Write-Error "Unsupported input extension '$ext'. This script supports .mkv and .mp4."
+        Write-Fail "Unsupported input extension '$ext'. This script supports .mkv and .mp4."
         return $false
     }
 
@@ -222,19 +231,19 @@ function Convert-OneFile([string]$file, [bool]$replace, [string]$logPath) {
     # Backup original (same behavior as your script)
     $backup = $fullPath + ".orig"
     if (Test-Path -LiteralPath $backup) {
-        Write-Error "Backup file already exists: '$backup' (won't overwrite)."
+        Write-Fail "Backup file already exists: '$backup' (won't overwrite)."
         return $false
     }
 
     try {
         $audioStreams = @(Get-AudioStreams $fullPath)
     } catch {
-        Write-Error $_
+        Write-Fail $_
         return $false
     }
 
     if ($audioStreams.Count -lt 1) {
-        Write-Error "No audio streams found in '$fullPath'."
+        Write-Fail "No audio streams found in '$fullPath'."
         return $false
     }
 
@@ -245,9 +254,9 @@ function Convert-OneFile([string]$file, [bool]$replace, [string]$logPath) {
         return $true
     }
 
-    # Remove any stale temp file
+    # Remove any stale temp file/directory
     if (Test-Path -LiteralPath $tempOut) {
-        Remove-Item -LiteralPath $tempOut -Force
+        Remove-Item -LiteralPath $tempOut -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     $mode = if ($replace) { "replace" } else { "add" }
@@ -262,14 +271,22 @@ function Convert-OneFile([string]$file, [bool]$replace, [string]$logPath) {
         Write-Warning "Conversion failed with subtitles for MP4. Retrying without subtitles..."
         Write-Log $logPath "WARNING: MP4 conversion with subtitles failed; retrying without subtitles."
         if (Test-Path -LiteralPath $tempOut) {
-            Remove-Item -LiteralPath $tempOut -Force
+            Remove-Item -LiteralPath $tempOut -Recurse -Force -ErrorAction SilentlyContinue
         }
         $rc = Invoke-Convert -inPath $fullPath -outPath $tempOut -audioStreams $audioStreams -keepSubs $false -replace $replace -ext $ext -logPath $logPath
     }
 
     if ($rc -ne 0) {
-        Write-Error "ffmpeg encountered an error during conversion."
+        Write-Fail "ffmpeg exited with code $rc for $fullPath"
         Write-Log $logPath "ERROR: ffmpeg exited with code $rc for $fullPath"
+        return $false
+    }
+
+    # Refuse to proceed unless the temp output is a real file; a leftover
+    # directory (or anything else) here must not be renamed over the original.
+    if (-not (Test-Path -LiteralPath $tempOut -PathType Leaf)) {
+        Write-Fail "Temp output '$tempOut' is not a file. Skipping replacement of '$fullPath' (original untouched)."
+        Write-Log $logPath "ERROR: temp output '$tempOut' is not a file; original not replaced."
         return $false
     }
 
@@ -284,7 +301,7 @@ function Convert-OneFile([string]$file, [bool]$replace, [string]$logPath) {
     return $true
 }
 
-$failed = $false
+$failed = @()
 foreach ($target in $targets) {
     if ($ConfirmEach) {
         $answer = Read-Host "Convert '$target'? [y/N]"
@@ -295,11 +312,14 @@ foreach ($target in $targets) {
     }
 
     if (-not (Convert-OneFile -file $target -replace $Replace -logPath $logPath)) {
-        $failed = $true
+        $failed += $target
     }
 }
 
-if ($failed) {
+if ($failed.Count -gt 0) {
+    Write-Host ""
+    Write-Host "Failed files:" -ForegroundColor Red
+    $failed | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
     exit 1
 }
 exit 0
