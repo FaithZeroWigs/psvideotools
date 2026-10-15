@@ -157,8 +157,12 @@ function Invoke-Convert([string]$inPath, [string]$outPath, $audioStreams, [bool]
     $ffmpegArgs += @($outPath)
 
     Write-Host "Running: ffmpeg $($ffmpegArgs -join ' ')"
-    & ffmpeg @ffmpegArgs
-    return $LASTEXITCODE
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & ffmpeg @ffmpegArgs 2>&1 | ForEach-Object { Write-Host $_ }
+    $rc = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    return $rc
 }
 
 function Convert-OneFile([string]$file, [bool]$replace) {
