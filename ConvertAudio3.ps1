@@ -1,7 +1,8 @@
 param (
     [Parameter(Mandatory = $true)]
     [string]$InputFile,
-    [switch]$Replace
+    [switch]$Replace,
+    [switch]$Confirm
 )
 
 # Audio codecs that typically lack device support and should be converted to AC3.
@@ -17,30 +18,27 @@ if (-not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# Validate input file
+# Validate input path
 if (-not (Test-Path -LiteralPath $InputFile)) {
-    Write-Error "Input file '$InputFile' does not exist."
+    Write-Error "Input path '$InputFile' does not exist."
     exit 1
 }
 
-$fullPath = (Resolve-Path -LiteralPath $InputFile).Path
-$ext = [System.IO.Path]::GetExtension($fullPath).ToLowerInvariant()
-if ($ext -ne ".mkv" -and $ext -ne ".mp4") {
-    Write-Error "Unsupported input extension '$ext'. This script supports .mkv and .mp4."
-    exit 1
-}
-
-$dir = [System.IO.Path]::GetDirectoryName($fullPath)
-$base = [System.IO.Path]::GetFileNameWithoutExtension($fullPath)
-
-# Temp output uses SAME container as input
-$tempOut = Join-Path $dir ($base + ".temp" + $ext)
-
-# Backup original (same behavior as your script)
-$backup = $fullPath + ".orig"
-if (Test-Path -LiteralPath $backup) {
-    Write-Error "Backup file already exists: '$backup' (won't overwrite)."
-    exit 1
+# Determine processing targets: a single file, or all .mkv/.mp4 files inside a folder.
+$targets = @()
+if ((Get-Item -LiteralPath $InputFile).PSIsContainer) {
+    $targets = @(
+        Get-ChildItem -LiteralPath $InputFile -File |
+            Where-Object { $_.Extension -ieq ".mkv" -or $_.Extension -ieq ".mp4" } |
+            Sort-Object Name |
+            ForEach-Object { $_.FullName }
+    )
+    if ($targets.Count -lt 1) {
+        Write-Error "No .mkv or .mp4 files found in folder '$InputFile'."
+        exit 1
+    }
+} else {
+    $targets = @((Resolve-Path -LiteralPath $InputFile).Path)
 }
 
 function Get-AudioStreams([string]$path) {
@@ -83,7 +81,7 @@ function Get-AudioStreams([string]$path) {
 }
 
 
-function Invoke-Convert([string]$inPath, [string]$outPath, $audioStreams, [bool]$keepSubs, [bool]$replace) {
+function Invoke-Convert([string]$inPath, [string]$outPath, $audioStreams, [bool]$keepSubs, [bool]$replace, [string]$ext) {
     $convertStreams = @($audioStreams | Where-Object { $convertCodecs -contains $_.codec })
 
     # Build ordered output-audio stream definitions.
@@ -162,53 +160,96 @@ function Invoke-Convert([string]$inPath, [string]$outPath, $audioStreams, [bool]
     return $LASTEXITCODE
 }
 
-try {
-    $audioStreams = @(Get-AudioStreams $fullPath)
-} catch {
-    Write-Error $_
-    exit 1
-}
+function Convert-OneFile([string]$file, [bool]$replace) {
+    $fullPath = (Resolve-Path -LiteralPath $file).Path
+    $ext = [System.IO.Path]::GetExtension($fullPath).ToLowerInvariant()
+    if ($ext -ne ".mkv" -and $ext -ne ".mp4") {
+        Write-Error "Unsupported input extension '$ext'. This script supports .mkv and .mp4."
+        return $false
+    }
 
-if ($audioStreams.Count -lt 1) {
-    Write-Error "No audio streams found in '$fullPath'."
-    exit 1
-}
+    $dir = [System.IO.Path]::GetDirectoryName($fullPath)
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($fullPath)
 
-$convertStreams = @($audioStreams | Where-Object { $convertCodecs -contains $_.codec })
-if ($convertStreams.Count -lt 1) {
-    Write-Host "No audio streams require conversion (target codecs: $($convertCodecs -join ', ')). Nothing to do."
-    exit 0
-}
+    # Temp output uses SAME container as input
+    $tempOut = Join-Path $dir ($base + ".temp" + $ext)
 
-# Remove any stale temp file
-if (Test-Path -LiteralPath $tempOut) {
-    Remove-Item -LiteralPath $tempOut -Force
-}
+    # Backup original (same behavior as your script)
+    $backup = $fullPath + ".orig"
+    if (Test-Path -LiteralPath $backup) {
+        Write-Error "Backup file already exists: '$backup' (won't overwrite)."
+        return $false
+    }
 
-$mode = if ($Replace) { "replace" } else { "add" }
-Write-Host "Converting $($convertStreams.Count) audio stream(s) to AC3 (mode: $mode) for file: $fullPath ..."
+    try {
+        $audioStreams = @(Get-AudioStreams $fullPath)
+    } catch {
+        Write-Error $_
+        return $false
+    }
 
-$keepSubs = $true
-$rc = Invoke-Convert -inPath $fullPath -outPath $tempOut -audioStreams $audioStreams -keepSubs $keepSubs -replace $Replace
+    if ($audioStreams.Count -lt 1) {
+        Write-Error "No audio streams found in '$fullPath'."
+        return $false
+    }
 
-# If MP4 + subtitles fails, retry without subtitles (common when subs are not MP4-compatible)
-if ($rc -ne 0 -and $ext -eq ".mp4" -and $keepSubs) {
-    Write-Warning "Conversion failed with subtitles for MP4. Retrying without subtitles..."
+    $convertStreams = @($audioStreams | Where-Object { $convertCodecs -contains $_.codec })
+    if ($convertStreams.Count -lt 1) {
+        Write-Host "No audio streams require conversion (target codecs: $($convertCodecs -join ', ')). Nothing to do."
+        return $true
+    }
+
+    # Remove any stale temp file
     if (Test-Path -LiteralPath $tempOut) {
         Remove-Item -LiteralPath $tempOut -Force
     }
-    $rc = Invoke-Convert -inPath $fullPath -outPath $tempOut -audioStreams $audioStreams -keepSubs $false -replace $Replace
+
+    $mode = if ($replace) { "replace" } else { "add" }
+    Write-Host "Converting $($convertStreams.Count) audio stream(s) to AC3 (mode: $mode) for file: $fullPath ..."
+
+    $keepSubs = $true
+    $rc = Invoke-Convert -inPath $fullPath -outPath $tempOut -audioStreams $audioStreams -keepSubs $keepSubs -replace $replace -ext $ext
+
+    # If MP4 + subtitles fails, retry without subtitles (common when subs are not MP4-compatible)
+    if ($rc -ne 0 -and $ext -eq ".mp4" -and $keepSubs) {
+        Write-Warning "Conversion failed with subtitles for MP4. Retrying without subtitles..."
+        if (Test-Path -LiteralPath $tempOut) {
+            Remove-Item -LiteralPath $tempOut -Force
+        }
+        $rc = Invoke-Convert -inPath $fullPath -outPath $tempOut -audioStreams $audioStreams -keepSubs $false -replace $replace -ext $ext
+    }
+
+    if ($rc -ne 0) {
+        Write-Error "ffmpeg encountered an error during conversion."
+        return $false
+    }
+
+    Write-Host "Renaming original file to: $backup"
+    Rename-Item -LiteralPath $fullPath -NewName $backup
+
+    Write-Host "Renaming converted file to: $fullPath"
+    Rename-Item -LiteralPath $tempOut -NewName $fullPath
+
+    Write-Host "Conversion complete. Original file backed up as '$backup'."
+    return $true
 }
 
-if ($rc -ne 0) {
-    Write-Error "ffmpeg encountered an error during conversion."
+$failed = $false
+foreach ($target in $targets) {
+    if ($Confirm) {
+        $answer = Read-Host "Convert '$target'? [y/N]"
+        if ($answer -notmatch '^[yY]') {
+            Write-Host "Skipping '$target'."
+            continue
+        }
+    }
+
+    if (-not (Convert-OneFile -file $target -replace $Replace)) {
+        $failed = $true
+    }
+}
+
+if ($failed) {
     exit 1
 }
-
-Write-Host "Renaming original file to: $backup"
-Rename-Item -LiteralPath $fullPath -NewName $backup
-
-Write-Host "Renaming converted file to: $fullPath"
-Rename-Item -LiteralPath $tempOut -NewName $fullPath
-
-Write-Host "Conversion complete. Original file backed up as '$backup'."
+exit 0
